@@ -24,6 +24,12 @@ from ledfx.effects import Effect
 from ledfx.effects.math import ExpFilter
 from ledfx.effects.melbank import MIC_RATE, Melbanks
 from ledfx.events import AudioDeviceChangeEvent, AudioSourceErrorEvent, Event
+from ledfx.lichtshow.geluidstap import (
+    GELUIDSTAP_DEVICE,
+    GELUIDSTAP_HOSTAPI,
+    GeluidstapStream,
+    geluidstap_beschikbaar,
+)
 from ledfx.sendspin import SENDSPIN_AVAILABLE
 from ledfx.sendspin.config import is_always_on as is_sendspin_always_on
 
@@ -390,6 +396,8 @@ class AudioInputSource:
         apis = sd.query_hostapis() + ({"name": "WEB AUDIO"},)
         if SENDSPIN_AVAILABLE:
             apis = apis + ({"name": "SENDSPIN"},)
+        if geluidstap_beschikbaar():
+            apis = apis + ({"name": GELUIDSTAP_HOSTAPI},)
         return apis
 
     @staticmethod
@@ -421,6 +429,18 @@ class AudioInputSource:
                 for name, config in SENDSPIN_SERVERS.items()
             )
             devices = devices + sendspin_devices
+        tap_idx = next(
+            (i for i, h in enumerate(hostapis) if h["name"] == GELUIDSTAP_HOSTAPI),
+            None,
+        )
+        if tap_idx is not None and geluidstap_beschikbaar():
+            devices = devices + (
+                {
+                    "hostapi": tap_idx,
+                    "name": GELUIDSTAP_DEVICE,
+                    "max_input_channels": 1,
+                },
+            )
         return devices
 
     @staticmethod
@@ -831,6 +851,19 @@ class AudioInputSource:
                     self._audio_sample_callback,
                     instance_id=self._ledfx.config.instance_id,
                     ledfx=self._ledfx,
+                )
+            elif hostapis[device["hostapi"]]["name"] == GELUIDSTAP_HOSTAPI:
+                naam = f"{GELUIDSTAP_HOSTAPI}: {GELUIDSTAP_DEVICE}"
+                AudioInputSource._stream = GeluidstapStream(
+                    self._audio_sample_callback,
+                    blocks_per_second=self._config.sample_rate,
+                    on_error=lambda melding: self._ledfx.events.fire_event(
+                        AudioSourceErrorEvent(
+                            error_type="geluidstap_unavailable",
+                            message=melding,
+                            device_name=naam,
+                        )
+                    ),
                 )
             else:
                 AudioInputSource._stream = self._audio.InputStream(
