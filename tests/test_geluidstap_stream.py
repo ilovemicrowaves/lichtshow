@@ -153,3 +153,11 @@ def test_stokken_halverwege_geeft_melding():
     assert _wacht(lambda: fouten, s=4.0)
     st.stop()
     assert "no audio" in fouten[0]
+
+
+def test_standaard_wachttijd_ruim_genoeg_voor_herstart():
+    # Gemeten 14 okt: macOS start de app in 0,6-1,8 s, bij direct herstarten
+    # duurt het tot ~5 s voor er geluid is. Een wachttijd van 5 s gaf dan een
+    # valse "geen toestemming"-melding.
+    st = GeluidstapStream(lambda *a: None, blocks_per_second=60)
+    assert st.wachttijd >= 10

@@ -101,7 +101,7 @@ class GeluidstapStream:
         blocks_per_second: int,
         on_error=None,
         starter=None,
-        wachttijd: float = 5.0,
+        wachttijd: float = 10.0,
         stiltijd: float = 3.0,
     ):
         self.callback = callback
