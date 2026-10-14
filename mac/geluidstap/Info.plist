@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.ilovemicrowaves.lichtshow.geluidstap</string>
+<key>CFBundleName</key><string>Geluidstap</string>
+<key>CFBundleExecutable</key><string>geluidstap</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSUIElement</key><true/>
+<key>NSAudioCaptureUsageDescription</key><string>Lichtshow listens to your Mac's audio to make the lights follow the music. Nothing is recorded or stored.</string>
+</dict></plist>
