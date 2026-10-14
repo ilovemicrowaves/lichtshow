@@ -85,8 +85,13 @@ var aggID = AudioObjectID(kAudioObjectUnknown)
 err = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggID)
 if err != noErr { fail("aggregate device mislukt", err) }
 
+// De buffers komen op de rate van het aggregate device (= die van de klok,
+// het uitvoerapparaat), niet op die van de tap: de drift-compensatie zet de tap
+// om. Op Joels MacBook-speakers is dat 44100, terwijl de tap 48000 meldt. Die
+// rate melden gaf 8% te weinig blokken en een verschoven spectrum (14 okt).
+let rate = prop(aggID, kAudioDevicePropertyNominalSampleRate, Float64(0))
 FileHandle.standardError.write(
-    "formaat: \(Int(format.mSampleRate)) Hz, \(format.mChannelsPerFrame) kanalen, float32\n".data(using: .utf8)!)
+    "formaat: \(Int(rate)) Hz, \(format.mChannelsPerFrame) kanalen, float32\n".data(using: .utf8)!)
 
 func opruimen() {
     AudioHardwareDestroyAggregateDevice(aggID)
