@@ -104,7 +104,9 @@ class HueDevice(NetworkedDevice):
             # We need to check if the credentials are still valid for this device.
             username = getattr(self.config, "username")  # noqa: B009 - stored extra, not a declared field
             response, _ = self._hue_request("GET", f"api/{username}")
-            if "error" in response[0]:
+            # Een geldige username geeft een dict (bridge-config); alleen een
+            # lijst kan een foutmelding bevatten. Zie tests/test_hue_register.py.
+            if isinstance(response, list) and response and "error" in response[0]:
                 # Credentials are no longer valid - need Bridge Link Button to be pressed and LedFx to be restarted.
                 # We delete the invalid credentials here - after a restart a fresh registration will be tried.
                 self.update_config({"username": None, "clientkey": None})
