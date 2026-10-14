@@ -102,12 +102,14 @@ class GeluidstapStream:
         on_error=None,
         starter=None,
         wachttijd: float = 5.0,
+        stiltijd: float = 3.0,
     ):
         self.callback = callback
         self.blocks_per_second = blocks_per_second
         self.on_error = on_error
         self.starter = starter or start_app
         self.wachttijd = wachttijd
+        self.stiltijd = stiltijd
         self._actief = False
         self._map = None
         self._stopper = None
@@ -127,7 +129,14 @@ class GeluidstapStream:
         self._actief = True
         self._gemeld = False
         self._laatste_data = None
-        self._stopper = self.starter(self._fifo, self._err)
+        try:
+            self._stopper = self.starter(self._fifo, self._err)
+        except Exception as fout:
+            self._actief = False
+            os.close(self._fd)
+            shutil.rmtree(self._map, ignore_errors=True)
+            self._map = None
+            raise OSError(f"Geluidstap could not be started: {fout}") from fout
         self._lezer = threading.Thread(
             target=self._lees, name="geluidstap", daemon=True
         )
@@ -157,13 +166,25 @@ class GeluidstapStream:
 
     def _waakhond(self) -> None:
         eind = time.monotonic() + self.wachttijd
-        while self._actief and time.monotonic() < eind:
+        while self._actief and self._laatste_data is None and time.monotonic() < eind:
             time.sleep(0.05)
         if self._actief and self._laatste_data is None:
             fout = [
                 r for r in self._err_tekst().splitlines() if r.startswith("geluidstap:")
             ]
             self._meld(fout[0] if fout else GEEN_TOESTEMMING_MELDING)
+            return
+        # Daarna blijven opletten: stilte in de muziek levert nog steeds
+        # (nul-)buffers op; géén buffers betekent dat de bron is gestokt,
+        # bijvoorbeeld omdat het uitvoerapparaat (de klok) wegviel.
+        while self._actief:
+            time.sleep(0.1)
+            laatste = self._laatste_data
+            if laatste is not None and time.monotonic() - laatste > self.stiltijd:
+                self._meld(
+                    "Geluidstap receives no audio anymore (output device gone?)."
+                )
+                return
 
     def _lees(self) -> None:
         fd = self._fd

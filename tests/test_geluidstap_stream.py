@@ -119,3 +119,37 @@ def test_geen_melding_na_stop():
     st.stop()
     time.sleep(0.8)
     assert fouten == []
+
+
+def test_mislukte_start_ruimt_op_en_geeft_oserror():
+    import subprocess
+
+    import pytest
+
+    def kapotte_starter(fifo, errbestand):
+        raise subprocess.CalledProcessError(1, ["open"])
+
+    st = GeluidstapStream(
+        lambda *a: None, blocks_per_second=60, starter=kapotte_starter
+    )
+    with pytest.raises(OSError):
+        st.start()
+    assert st._map is None
+    assert not st._actief
+    st.stop()  # mag, zonder fout
+
+
+def test_stokken_halverwege_geeft_melding():
+    fouten = []
+    st = GeluidstapStream(
+        lambda *a: None,
+        blocks_per_second=60,
+        on_error=fouten.append,
+        starter=_nep_starter(frames=800),  # schrijft 1 blok en houdt de fifo open
+        wachttijd=5.0,
+        stiltijd=0.5,
+    )
+    st.start()
+    assert _wacht(lambda: fouten, s=4.0)
+    st.stop()
+    assert "no audio" in fouten[0]
