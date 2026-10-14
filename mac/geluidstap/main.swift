@@ -29,6 +29,22 @@ func prop<T>(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector, _ initial
     return value
 }
 
+// 0. `open --stdout <fifo>` opent de fifo lezen+schrijven. Daardoor is de app
+//    zijn eigen lezer: verdwijnt LedFx, dan komt er nooit EPIPE en blijft
+//    write() hangen (gezien 14 okt). Daarom stdout opnieuw openen, alleen
+//    schrijven. Is de lezer al weg, dan direct stoppen, vóór er iets bestaat.
+var st = stat()
+if fstat(1, &st) == 0 && (st.st_mode & S_IFMT) == S_IFIFO {
+    var pad = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    if fcntl(1, F_GETPATH, &pad) == 0 {
+        let fd = open(pad, O_WRONLY | O_NONBLOCK)
+        if fd < 0 { exit(0) }  // geen lezer meer
+        _ = fcntl(fd, F_SETFL, 0)  // weer blokkerend schrijven (in de schrijfthread)
+        dup2(fd, 1)
+        close(fd)
+    }
+}
+
 // 1. Tap op alle processen (globaal), geluid blijft hoorbaar. Uitgesloten:
 //    Rogue Amoeba (SoundSource's arkaudiod speelt het geluid mét Joels EQ
 //    opnieuw af). De analyse moet het schone signaal krijgen (eis Joel, 14 okt).
@@ -93,18 +109,89 @@ let rate = prop(aggID, kAudioDevicePropertyNominalSampleRate, Float64(0))
 FileHandle.standardError.write(
     "formaat: \(Int(rate)) Hz, \(format.mChannelsPerFrame) kanalen, float32\n".data(using: .utf8)!)
 
-func opruimen() {
+// 3. Opruimen gebeurt alleen op de main queue, één keer, in vaste volgorde
+//    (stoppen → IO-proc weg → aggregate weg → tap weg). Nooit in een
+//    signal handler en nooit vanuit de IO-thread zelf: dat kan Core Audio
+//    laten vastlopen (review 14 okt; Joel zag Core Audio die dag hangen).
+var procID: AudioDeviceIOProcID?
+var opgeruimd = false
+func stoppen() {
+    if opgeruimd { return }
+    opgeruimd = true
+    if let id = procID {
+        AudioDeviceStop(aggID, id)
+        AudioDeviceDestroyIOProcID(aggID, id)
+    }
     AudioHardwareDestroyAggregateDevice(aggID)
     AudioHardwareDestroyProcessTap(tapID)
+    exit(0)
 }
 signal(SIGPIPE, SIG_IGN)
+var signaalbronnen: [DispatchSourceSignal] = []
 for s in [SIGINT, SIGTERM] {
-    signal(s) { _ in opruimen(); exit(0) }
+    signal(s, SIG_IGN)
+    let bron = DispatchSource.makeSignalSource(signal: s, queue: .main)
+    bron.setEventHandler { stoppen() }
+    bron.resume()
+    signaalbronnen.append(bron)
 }
 
-// 3. Elke buffer direct naar stdout.
-let out = FileHandle.standardOutput
-var procID: AudioDeviceIOProcID?
+// 4. De IO-thread (realtime) kopieert alleen naar een vooraf gereserveerde
+//    ringbuffer; een gewone thread schrijft naar stdout. Loopt de lezer achter,
+//    dan vallen er stukken weg in plaats van dat de audiothread blokkeert.
+final class Ring {
+    let cap: Int
+    let buf: UnsafeMutablePointer<UInt8>
+    var kop = 0, vulling = 0
+    var slot = os_unfair_lock()
+    init(cap: Int) { self.cap = cap; buf = .allocate(capacity: cap) }
+    func erin(_ p: UnsafeRawPointer, _ n: Int) -> Bool {
+        os_unfair_lock_lock(&slot); defer { os_unfair_lock_unlock(&slot) }
+        if n > cap - vulling { return false }
+        let src = p.assumingMemoryBound(to: UInt8.self)
+        let staart = (kop + vulling) % cap
+        let eerste = min(n, cap - staart)
+        (buf + staart).update(from: src, count: eerste)
+        if n > eerste { buf.update(from: src + eerste, count: n - eerste) }
+        vulling += n
+        return true
+    }
+    func eruit(_ doel: UnsafeMutablePointer<UInt8>, _ max: Int) -> Int {
+        os_unfair_lock_lock(&slot); defer { os_unfair_lock_unlock(&slot) }
+        let n = min(max, vulling)
+        let eerste = min(n, cap - kop)
+        doel.update(from: buf + kop, count: eerste)
+        if n > eerste { (doel + eerste).update(from: buf, count: n - eerste) }
+        kop = (kop + n) % cap
+        vulling -= n
+        return n
+    }
+}
+let ring = Ring(cap: 4 * 1024 * 1024)  // ~12 s stereo float32 bij 44,1 kHz
+let erIsData = DispatchSemaphore(value: 0)
+let tapKanalen = format.mChannelsPerFrame
+
+Thread {
+    let blok = UnsafeMutablePointer<UInt8>.allocate(capacity: 65536)
+    while true {
+        erIsData.wait()
+        while true {
+            let n = ring.eruit(blok, 65536)
+            if n == 0 { break }
+            var gedaan = 0
+            while gedaan < n {
+                let w = write(1, blok + gedaan, n - gedaan)
+                if w < 0 {
+                    if errno == EINTR { continue }
+                    DispatchQueue.main.async { stoppen() }  // lezer is weg
+                    return
+                }
+                gedaan += w
+            }
+        }
+    }
+}.start()
+
 let debug = ProcessInfo.processInfo.environment["TAP_DEBUG"] != nil
 var aanroepen = 0
 err = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, nil) { _, inData, _, _, _ in
@@ -114,11 +201,11 @@ err = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, nil) { _, inData, _, _,
         let sizes = abl.map { "\($0.mNumberChannels)ch/\($0.mDataByteSize)B" }.joined(separator: ",")
         FileHandle.standardError.write("callback \(aanroepen): \(abl.count) buffers [\(sizes)]\n".data(using: .utf8)!)
     }
-    for buf in abl {
-        guard let p = buf.mData, buf.mDataByteSize > 0 else { continue }
-        let data = Data(bytes: p, count: Int(buf.mDataByteSize))
-        do { try out.write(contentsOf: data) } catch { opruimen(); exit(0) }  // lezer weg
-    }
+    // Alleen de tap: die komt ná de invoerkanalen van het uitvoerapparaat.
+    // Heeft dat apparaat zelf ingangen (zoals de SSL 2), dan zitten die ervóór.
+    guard let tap = abl.last, tap.mNumberChannels == tapKanalen,
+          let p = tap.mData, tap.mDataByteSize > 0 else { return }
+    if ring.erin(p, Int(tap.mDataByteSize)) { erIsData.signal() }
 }
 if err != noErr { fail("IO-proc mislukt", err) }
 err = AudioDeviceStart(aggID, procID)
